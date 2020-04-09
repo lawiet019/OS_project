@@ -70,10 +70,14 @@ public:
         remIO.pop_back();
     }
 
-    bool burst(){
-        bool ret = (remCPU.back() == 1);
+    bool isFinished(){
+        return !remCPU[remBurst-1];
+    }
+
+    void burst(){
+        // bool ret = (remCPU.back() == 1);
         remCPU[remBurst-1]--;
-        return ret;
+        // return ret;
     }
 
     int getNextReady(int curTime){
@@ -140,8 +144,9 @@ public:
     int curProcessRunningTime;
     int rrPos;
     int finished;
-    Process* switchOutCand;
-    priority_queue<pair<int, Process*>, vector<pair<int, Process*>>, cmp> arrivePQ, ioPQ;
+    bool firstTimeRunning;
+    // Process* switchOutCand;
+    priority_queue<pair<int, Process*>, vector<pair<int, Process*>>, cmp> arrivePQ, ioPQ, preemptPQ;
     deque<Process*> readyQueue;
     unordered_set<char> preemptedProcesses;
 
@@ -162,62 +167,8 @@ public:
         processes = _processes;
         rrPos = END;
         finished = 0;
-        switchOutCand = NULL;
-        
-    }
-
-    void resetAll(){
-        for(auto p: processes){
-            p->reset();
-        }
-        arrivePQ.empty();
-        ioPQ.empty();
-    }
-
-    void addArrivePQ(){
-        for(auto p : processes){
-            arrivePQ.push({p->arriveTime, p});
-            cout<<"Process "<< p->name <<" [NEW] (arrival time "<< p->arriveTime <<" ms) "<< p->totBurst <<" CPU bursts"<<endl;
-        }
-    }
-    void updateReadyQueue(){
-        if(cpuStatus == RUNNING && curProcess){
-            bool isFinished = curProcess->burst();
-            if(isFinished){
-                int nextReady = curProcess->getNextReady(curTime);
-                if(nextReady == -1) {
-                    finished ++;
-                    cout<<"time "<<curTime<<"ms: Process "<<curProcess->name<<" terminated "<< printReadyQueue() <<endl;
-                }else{
-                    ioPQ.push({nextReady + csTime, curProcess});
-                    preemptedProcesses.erase(curProcess->name);
-                    cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" completed a CPU burst; "<< curProcess->remBurst <<" burst"<< (curProcess->remBurst == 1? "" : "s") <<" to go "<<printReadyQueue()<<endl;
-                    cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" switching out of CPU; will block on I/O until time "<< nextReady + csTime <<"ms "<< printReadyQueue() <<endl;
-                }
-                cpuStatus = CONTEXT_SWITCH_DOWN;
-            }
-        }
-        while(!ioPQ.empty() && ioPQ.top().first == curTime){
-            auto newArrival = ioPQ.top().second;
-            if(rrPos == BEGINNING){
-                readyQueue.push_front(ioPQ.top().second);
-            }else if(rrPos == END){
-                readyQueue.push_back(ioPQ.top().second);
-            }
-            ioPQ.pop();
-            cout<<"time "<< curTime <<"ms: Process "<< newArrival->name <<" completed I/O; added to ready queue "<< printReadyQueue() <<endl;
-        }
-        while(!arrivePQ.empty() && arrivePQ.top().first == curTime){
-            auto newArrival = arrivePQ.top().second;
-            if(rrPos == BEGINNING){
-                readyQueue.push_front(arrivePQ.top().second);
-            }else if(rrPos == END){
-                readyQueue.push_back(arrivePQ.top().second);
-            }
-            arrivePQ.pop();
-            cout<<"time "<< curTime <<"ms: Process "<< newArrival->name <<" arrived; added to ready queue " << printReadyQueue()<<endl;
-        }
-
+        // switchOutCand = NULL;
+        firstTimeRunning = false;
     }
 
     string printReadyQueue(){
@@ -237,85 +188,334 @@ public:
         ret += "]";
         return ret;
     }
+
+    void resetAll(){
+        for(auto p: processes){
+            p->reset();
+        }
+        arrivePQ.empty();
+        ioPQ.empty();
+    }
+
+    void addArrivePQ(){
+        for(auto p : processes){
+            arrivePQ.push({p->arriveTime, p});
+            cout<<"Process "<< p->name <<" [NEW] (arrival time "<< p->arriveTime <<" ms) "<< p->totBurst <<" CPU bursts"<<endl;
+        }
+    }
+
+    bool processFinishBurst(){
+        // Process* ret = NULL;
+        if(cpuStatus == RUNNING && curProcess && curProcess->isFinished()){
+            int nextReady = curProcess->getNextReady(curTime);
+            if(nextReady == -1) {
+                finished ++;
+                cout<<"time "<<curTime<<"ms: Process "<<curProcess->name<<" terminated "<< printReadyQueue() <<endl;
+            }else{
+                ioPQ.push({nextReady + csTime, curProcess});
+                preemptedProcesses.erase(curProcess->name);
+                cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" completed a CPU burst; "<< curProcess->remBurst <<" burst"<< (curProcess->remBurst == 1? "" : "s") <<" to go "<<printReadyQueue()<<endl;
+                cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" switching out of CPU; will block on I/O until time "<< nextReady + csTime <<"ms "<< printReadyQueue() <<endl;
+            }
+            curProcessRunningTime = 0;
+            cpuStatus = CONTEXT_SWITCH_DOWN;
+            preemptedProcesses.erase(curProcess->name);
+            return true;
+        }
+        return false;
+
+    }
+
+    bool checkRRPreempt(){
+        // cout<<curTime<<" "<<curProcessRunningTime<<endl;
+        return (cpuStatus == RUNNING && curProcessRunningTime == sliceTime);
+    }
+
+    bool rrPreemptSwitchDown(){
+        bool ret = checkRRPreempt();
+        if(!ret) return ret;
+        if(readyQueue.empty()){
+            cout<<"time "<< curTime <<"ms: Time slice expired; no preemption because ready queue is empty "<< printReadyQueue() <<endl;
+            return false;
+        }
+        preemptedProcesses.insert(curProcess->name);
+        preemptPQ.push({curTime + csTime, curProcess});
+        cpuStatus = CONTEXT_SWITCH_DOWN;
+        curProcessRunningTime = 0;
+        cout<<"time "<< curTime <<"ms: Time slice expired; process "<<curProcess->name<<" preempted with "<< curProcess->remCPU.back() <<"ms to go "<<printReadyQueue()<<endl;   
+        return ret;
+    }
     
-    void cpuRun1ms(){
-        
+    void updatReadyQueueFromIOPQ(){
+        while(!ioPQ.empty() && ioPQ.top().first == curTime){
+            if(cpuStatus == IDLE){
+                cpuStatus = CONTEXT_SWITCH_UP;
+            }
+            auto newArrival = ioPQ.top().second;
+            if(rrPos == BEGINNING){
+                readyQueue.push_front(ioPQ.top().second);
+            }else if(rrPos == END){
+                readyQueue.push_back(ioPQ.top().second);
+            }
+            ioPQ.pop();
+            cout<<"time "<< curTime <<"ms: Process "<< newArrival->name <<" completed I/O; added to ready queue "<< printReadyQueue() <<endl;
+        }
+    }
+
+    void updatReadyQueueFromArrivePQ(){
+        while(!arrivePQ.empty() && arrivePQ.top().first == curTime){
+            if(cpuStatus == IDLE){
+                cpuStatus = CONTEXT_SWITCH_UP;
+            }
+            auto newArrival = arrivePQ.top().second;
+            if(rrPos == BEGINNING){
+                readyQueue.push_front(arrivePQ.top().second);
+            }else if(rrPos == END){
+                readyQueue.push_back(arrivePQ.top().second);
+            }
+            arrivePQ.pop();
+            cout<<"time "<< curTime <<"ms: Process "<< newArrival->name <<" arrived; added to ready queue " << printReadyQueue()<<endl;
+        }
+    }
+    
+    void updatReadyQueueFromPreemptPQ(){
+        while(!preemptPQ.empty() && preemptPQ.top().first == curTime){
+            if(cpuStatus == IDLE){
+                cpuStatus = CONTEXT_SWITCH_UP;
+            }
+            auto newArrival = preemptPQ.top().second;
+            if(rrPos == BEGINNING){
+                readyQueue.push_front(preemptPQ.top().second);
+            }else if(rrPos == END){
+                readyQueue.push_back(preemptPQ.top().second);
+            }
+            preemptPQ.pop();
+            // cout<<"time "<< curTime <<"ms: Process "<< newArrival->name <<" survived from preempt; added to ready queue " << printReadyQueue()<<endl;
+        }
+    }
+
+    void updateReadyQueue(){
+        updatReadyQueueFromPreemptPQ();
+        updatReadyQueueFromIOPQ();
+        updatReadyQueueFromArrivePQ();
+
+
+        // if(cpuStatus == RUNNING && curProcess){
+        //     bool isFinished = curProcess->isFinished();
+        //     if(isFinished){
+        //         int nextReady = curProcess->getNextReady(curTime);
+        //         if(nextReady == -1) {
+        //             finished ++;
+        //             cout<<"time "<<curTime<<"ms: Process "<<curProcess->name<<" terminated "<< printReadyQueue() <<endl;
+        //         }else{
+        //             ioPQ.push({nextReady + csTime, curProcess});
+        //             preemptedProcesses.erase(curProcess->name);
+        //             cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" completed a CPU burst; "<< curProcess->remBurst <<" burst"<< (curProcess->remBurst == 1? "" : "s") <<" to go "<<printReadyQueue()<<endl;
+        //             cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" switching out of CPU; will block on I/O until time "<< nextReady + csTime <<"ms "<< printReadyQueue() <<endl;
+        //         }
+        //         cpuStatus = CONTEXT_SWITCH_DOWN;
+        //     }else{
+        //         curProcess->burst();
+        //     }
+        // }
+        // if(switchOutCand){
+            
+        // }
+
+        // while(!arrivePQ.empty() && arrivePQ.top().first == curTime){
+        //     if(cpuStatus == IDLE){
+        //         cpuStatus = CONTEXT_SWITCH_UP;
+        //     }
+        //     auto newArrival = arrivePQ.top().second;
+        //     if(rrPos == BEGINNING){
+        //         readyQueue.push_front(arrivePQ.top().second);
+        //     }else if(rrPos == END){
+        //         readyQueue.push_back(arrivePQ.top().second);
+        //     }
+        //     arrivePQ.pop();
+        //     cout<<"time "<< curTime <<"ms: Process "<< newArrival->name <<" arrived; added to ready queue " << printReadyQueue()<<endl;
+        // }
+        // if(cpuStatus == IDLE && !readyQueue.empty()){
+        //     cpuStatus = CONTEXT_SWITCH_UP;
+        // }
     }
 
 
-    void cpuWork1ms(){
-        if(cpuStatus == CONTEXT_SWITCH_DOWN){
-            cout<<curTime<<" down"<<endl;
-            remCSTime --;
-            if(remCSTime == -1){
+    void cpuStatusSwitch(bool finishRunning){
+        if(cpuStatus == RUNNING){
+            if(finishRunning) {
+                curProcess = NULL;
+                cpuStatus = CONTEXT_SWITCH_DOWN;
+            }
+        }else if(cpuStatus == CONTEXT_SWITCH_UP){
+            if(!remCSTime){
                 remCSTime = csTime;
-                if(switchOutCand){
-                    readyQueue.push_back(switchOutCand);
-                    switchOutCand = NULL;
-                }
-                if(readyQueue.empty()) {
+                cpuStatus = RUNNING;
+            }
+        }else if(cpuStatus == IDLE){
+            if(!readyQueue.empty()){
+                cpuStatus = CONTEXT_SWITCH_UP;
+            }
+        }else if(cpuStatus == CONTEXT_SWITCH_DOWN){
+            if(!remCSTime){
+                remCSTime = csTime;
+                if(readyQueue.empty()){
                     cpuStatus = IDLE;
                 }else{
                     cpuStatus = CONTEXT_SWITCH_UP;
                 }
             }
+        }
+    }
+
+    void cpuRun1ms(){
+        
+        if(cpuStatus == RUNNING){
+            
+           curProcess->burst();
         }else if(cpuStatus == CONTEXT_SWITCH_UP){
-            cout<<curTime<<" up"<<endl;
-            remCSTime --;
-            if(!remCSTime){
-                remCSTime = csTime;
-                cpuStatus = RUNNING;
-                curProcess = readyQueue.front();
-                readyQueue.pop_front();
-                if(!preemptedProcesses.count(curProcess->name)){
-                    preemptedProcesses.insert(curProcess->name);
-                    cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" started using the CPU for "<< curProcess->remCPU.back() <<"ms burst " << printReadyQueue() <<endl;
-                }else{
-                    cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" started using the CPU with "<< curProcess->remCPU.back() <<"ms burst remaining " << printReadyQueue() <<endl;
-                }
-                
-            }
-
-        }else if(cpuStatus == IDLE){
-            if(!readyQueue.empty()){
-                cpuStatus = CONTEXT_SWITCH_UP;
-            }
+           remCSTime--;
+        }else if(cpuStatus == CONTEXT_SWITCH_DOWN){
+            remCSTime--;
         }
     }
 
-    void rrSwitch(){
-        curProcessRunningTime = 0;
-        if(readyQueue.empty()) {
-            cout<<"time "<< curTime <<"ms: Time slice expired; no preemption because ready queue is empty "<< printReadyQueue() <<endl;
-            return;
-        }
-        cpuStatus = CONTEXT_SWITCH_DOWN;
-        cout<<"time "<< curTime <<"ms: Time slice expired; process "<<curProcess->name<<" preempted with "<< curProcess->remCPU.back() <<"ms to go "<<printReadyQueue()<<endl;
-        // readyQueue.push_back(curProcess);
-        switchOutCand = curProcess;
+    void incrementProcessRunningTime(){
+        if(cpuStatus == RUNNING)
+            curProcessRunningTime++;
     }
 
+    void prepareRunningProcess(){
+        if(cpuStatus == CONTEXT_SWITCH_UP && remCSTime == 0){
+            curProcess = readyQueue.front();
+            readyQueue.pop_front();
+            if(!preemptedProcesses.count(curProcess->name)){
+            // cout<<curProcess->remCPU.size()<<endl;
+                // preemptedProcesses.insert(curProcess->name);
+                cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" started using the CPU for "<< curProcess->remCPU.back() <<"ms burst " << printReadyQueue() <<endl;
+            }else{
+                cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" started using the CPU with "<< curProcess->remCPU.back() <<"ms burst remaining " << printReadyQueue() <<endl;
+            }
+        }
+    }
 
     void runRoundRobin(){
         resetAll();
         addArrivePQ();
         while (!isFinished()){
             
+            bool finishedBurst = processFinishBurst();
+            bool preemptBurst = rrPreemptSwitchDown();
+            
             updateReadyQueue();
-            // cout<<curTime<<" "<<cpuStatus<<endl;
-            if(cpuStatus == RUNNING) curProcessRunningTime++;
-            // cpuRun1ms();
-            cpuWork1ms();
-            if(cpuStatus == RUNNING && curProcessRunningTime == sliceTime) rrSwitch();
-            if(cpuStatus != RUNNING) curProcessRunningTime = 0;
+            prepareRunningProcess();
+            cpuStatusSwitch(finishedBurst || preemptBurst);
             
+            curTime ++;
+            // cout<<curTime<<" "<<curProcess<<endl;
+            // prepareRunningProcess();
             
-            
-            curTime++;
+            cpuRun1ms();
+            incrementProcessRunningTime();
             
         }
-
     }
+
+    // 
+    
+    // void cpuRun1ms(){
+    //     if(cpuStatus ==  RUNNING && firstTimeRunning){
+    //         firstTimeRunning = false;
+            
+    //         curProcess = readyQueue.front();
+    //         readyQueue.pop_front();
+            
+    //         if(!preemptedProcesses.count(curProcess->name)){
+    //             // cout<<curProcess->remCPU.size()<<endl;
+    //             preemptedProcesses.insert(curProcess->name);
+    //             cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" started using the CPU for "<< curProcess->remCPU.back() <<"ms burst " << printReadyQueue() <<endl;
+    //         }else{
+    //             cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" started using the CPU with "<< curProcess->remCPU.back() <<"ms burst remaining " << printReadyQueue() <<endl;
+    //         }
+    //         curProcess->burst();
+            
+    //     }
+    // }
+
+
+    // void cpuWork1ms(){
+    //     if(cpuStatus == CONTEXT_SWITCH_DOWN){
+    //         // cout<<curTime<<" down"<<endl;
+    //         remCSTime --;
+    //         if(!remCSTime){
+    //             remCSTime = csTime;
+    //             if(switchOutCand){
+    //                 readyQueue.push_back(switchOutCand);
+    //                 switchOutCand = NULL;
+    //             }
+    //             if(readyQueue.empty()) {
+    //                 cpuStatus = IDLE;
+    //             }else{
+    //                 cpuStatus = CONTEXT_SWITCH_UP;
+    //             }
+    //         }
+    //     }else if(cpuStatus == CONTEXT_SWITCH_UP){
+    //         // cout<<curTime<<" up"<<endl;
+    //         remCSTime --;
+    //         if(!remCSTime){
+    //             remCSTime = csTime;
+    //             cpuStatus = RUNNING;
+    //             firstTimeRunning = true;
+                
+    //         }
+
+    //     }else if(cpuStatus == IDLE){
+    //         if(!readyQueue.empty()){
+    //             cpuStatus = CONTEXT_SWITCH_UP;
+    //         }
+    //     }
+    // }
+
+
+
+
+    // void rrSwitch(){
+    //     curProcessRunningTime = 0;
+    //     if(readyQueue.empty()) {
+    //         cout<<"time "<< curTime <<"ms: Time slice expired; no preemption because ready queue is empty "<< printReadyQueue() <<endl;
+    //         return;
+    //     }
+    //     cpuStatus = CONTEXT_SWITCH_DOWN;
+    //     cout<<"time "<< curTime <<"ms: Time slice expired; process "<<curProcess->name<<" preempted with "<< curProcess->remCPU.back() <<"ms to go "<<printReadyQueue()<<endl;
+    //     // readyQueue.push_back(curProcess);
+    //     switchOutCand = curProcess;
+
+    // }
+
+
+    // void runRoundRobin(){
+    //     resetAll();
+    //     addArrivePQ();
+    //     while (!isFinished()){
+            
+    //         updateReadyQueue();
+    //         // cout<<curTime<<" "<<cpuStatus<<endl;
+            
+    //         // cpuRun1ms();
+    //         cpuRun1ms();
+    //         curTime++;
+    //         cpuWork1ms();
+    //         if(cpuStatus == RUNNING) curProcessRunningTime++;
+    //         if(cpuStatus == RUNNING && curProcessRunningTime == sliceTime) rrSwitch();
+    //         if(cpuStatus != RUNNING) curProcessRunningTime = 0;
+            
+            
+            
+            
+            
+    //     }
+
+    // }
 
 
 
