@@ -100,6 +100,10 @@ public:
         cout<<endl;
     }
 
+    int getCurrentBurstTime(){
+        if(remCPU.empty()) return -1;
+        return remCPU.back();
+    }
 
 };
 
@@ -111,7 +115,7 @@ struct cmp{
 };
 
 
-class Simulator{
+class Simulator_SJF{
 public:
     vector<Process*> processes;
     int sliceTime, curSliceTime;
@@ -124,9 +128,12 @@ public:
     int rrPos;
     int finished;
     bool firstTimeRunning;
+    double lambda;
+    double alpha;
+    unordered_map<char, int> predictedTau;
     // Process* switchOutCand;
-    priority_queue<pair<int, Process*>, vector<pair<int, Process*>>, cmp> arrivePQ, ioPQ, preemptPQ;
-    deque<Process*> readyQueue;
+    priority_queue<pair<int, Process*>, vector<pair<int, Process*>>, cmp> arrivePQ, ioPQ, readyPQ;
+    // deque<Process*> readyQueue;
     unordered_set<char> preemptedProcesses;
 
 
@@ -134,7 +141,7 @@ public:
         return (finished == nProcess);
     }
 
-    Simulator(int _n, int _s, int _cs, vector<Process*> &_processes){
+    Simulator_SJF(int _n, int _s, int _cs, double _alpha, double _lambda, vector<Process*> &_processes){
         sliceTime = _s;
         nProcess = _n;
         cpuStatus = IDLE;
@@ -146,25 +153,36 @@ public:
         processes = _processes;
         rrPos = END;
         finished = 0;
+        lambda = _lambda;
+        alpha = _alpha;
         // switchOutCand = NULL;
         firstTimeRunning = false;
+        for(auto p: processes){
+            predictedTau[p->name] = ceil(1 / lambda);
+        }
     }
 
+
     string printReadyQueue(){
-        if(readyQueue.empty()) return "[Q <empty>]";
+        if(readyPQ.empty()) return "[Q <empty>]";
         string ret = "[Q";
         // queue<Process*> tmpQ;
-        int size = readyQueue.size();
+        int size = readyPQ.size();
+        vector<pair<int, Process*>> tmp;
         for(int s=0; s<size; s++){
-            auto cur = readyQueue.front();
-            readyQueue.pop_front();
-            readyQueue.push_back(cur);
-            
+            auto [burstTime, cur] = readyPQ.top();
+            tmp.push_back({burstTime, cur});
+            readyPQ.pop();
             ret += " ";
             ret += cur->name;
+            // ret += ":";
+            // ret += to_string(burstTime);
             // ret += (" " + cur->name);
         }
         ret += "]";
+        for(auto p : tmp){
+            readyPQ.push(p);
+        }
         return ret;
     }
 
@@ -179,7 +197,7 @@ public:
     void addArrivePQ(){
         for(auto p : processes){
             arrivePQ.push({p->arriveTime, p});
-            cout<<"Process "<< p->name <<" [NEW] (arrival time "<< p->arriveTime <<" ms) "<< p->totBurst <<" CPU burst" << ( p->totBurst == 1? "":"s") <<endl;
+            cout<<"Process "<< p->name <<" [NEW] (arrival time "<< p->arriveTime <<" ms) "<< p->totBurst <<" CPU burst" << ( p->totBurst == 1? "":"s") <<" (tau "<< predictedTau[p->name] <<"ms)" <<endl;
         }
     }
 
@@ -187,15 +205,20 @@ public:
         // Process* ret = NULL;
         if(cpuStatus == RUNNING && curProcess && curProcess->isFinished()){
             int nextReady = curProcess->getNextReady(curTime);
+            int preTau = predictedTau[curProcess->name];
+            predictedTau[curProcess->name] = ceil( alpha * curProcessRunningTime + (1 - alpha) * predictedTau[curProcess->name] );
             if(nextReady == -1) {
                 finished ++;
-                cout<<"time "<<curTime<<"ms: Process "<<curProcess->name<<" terminated "<< printReadyQueue() <<endl;
+                cout<<"time "<<curTime<<"ms: Process "<<curProcess->name <<" terminated "<< printReadyQueue() <<endl;
+                
             }else{
                 ioPQ.push({nextReady + csTime, curProcess});
                 preemptedProcesses.erase(curProcess->name);
-                cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" completed a CPU burst; "<< curProcess->remBurst <<" burst"<< (curProcess->remBurst == 1? "" : "s") <<" to go "<<printReadyQueue()<<endl;
+                cout<<"time "<< curTime <<"ms: Process "<< curProcess->name << " (tau " << preTau << "ms)"  <<" completed a CPU burst; "<< curProcess->remBurst <<" burst"<< (curProcess->remBurst == 1? "" : "s") <<" to go "<<printReadyQueue()<<endl;
+                cout<<"time "<< curTime <<"ms: Recalculated tau = "<< predictedTau[curProcess->name] <<"ms for process " << curProcess->name<< " " << printReadyQueue() <<endl;
                 cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" switching out of CPU; will block on I/O until time "<< nextReady + csTime <<"ms "<< printReadyQueue() <<endl;
             }
+            
             curProcessRunningTime = 0;
             cpuStatus = CONTEXT_SWITCH_DOWN;
             preemptedProcesses.erase(curProcess->name);
@@ -205,25 +228,6 @@ public:
 
     }
 
-    bool checkRRPreempt(){
-        // cout<<curTime<<" "<<curProcessRunningTime<<endl;
-        return (cpuStatus == RUNNING && curProcessRunningTime == sliceTime);
-    }
-
-    bool rrPreemptSwitchDown(){
-        bool ret = checkRRPreempt();
-        if(!ret) return ret;
-        if(readyQueue.empty()){
-            cout<<"time "<< curTime <<"ms: Time slice expired; no preemption because ready queue is empty "<< printReadyQueue() <<endl;
-            return false;
-        }
-        preemptedProcesses.insert(curProcess->name);
-        preemptPQ.push({curTime + csTime, curProcess});
-        cpuStatus = CONTEXT_SWITCH_DOWN;
-        curProcessRunningTime = 0;
-        cout<<"time "<< curTime <<"ms: Time slice expired; process "<<curProcess->name<<" preempted with "<< curProcess->remCPU.back() <<"ms to go "<<printReadyQueue()<<endl;   
-        return ret;
-    }
     
     void updatReadyQueueFromIOPQ(){
         while(!ioPQ.empty() && ioPQ.top().first == curTime){
@@ -231,13 +235,15 @@ public:
                 cpuStatus = CONTEXT_SWITCH_UP;
             }
             auto newArrival = ioPQ.top().second;
-            if(rrPos == BEGINNING){
-                readyQueue.push_front(ioPQ.top().second);
-            }else if(rrPos == END){
-                readyQueue.push_back(ioPQ.top().second);
+            auto burstTime = newArrival->getCurrentBurstTime();
+            if(burstTime != -1){
+                int tau = predictedTau[newArrival->name];
+                readyPQ.push({tau, newArrival});
+                cout<<"time "<< curTime <<"ms: Process "<< newArrival->name << " (tau " << predictedTau[newArrival->name] << "ms) "  <<"completed I/O; added to ready queue "<< printReadyQueue() <<endl;
             }
+            
             ioPQ.pop();
-            cout<<"time "<< curTime <<"ms: Process "<< newArrival->name <<" completed I/O; added to ready queue "<< printReadyQueue() <<endl;
+            
         }
     }
 
@@ -247,34 +253,34 @@ public:
                 cpuStatus = CONTEXT_SWITCH_UP;
             }
             auto newArrival = arrivePQ.top().second;
-            if(rrPos == BEGINNING){
-                readyQueue.push_front(arrivePQ.top().second);
-            }else if(rrPos == END){
-                readyQueue.push_back(arrivePQ.top().second);
+            auto burstTime = newArrival->getCurrentBurstTime();
+            if(burstTime != -1){
+                int tau = predictedTau[newArrival->name];
+                readyPQ.push({tau, newArrival});
+                cout<<"time "<< curTime <<"ms: Process "<< newArrival->name<< " (tau " << predictedTau[newArrival->name] << "ms) " <<"arrived; added to ready queue " << printReadyQueue()<<endl;
             }
             arrivePQ.pop();
-            cout<<"time "<< curTime <<"ms: Process "<< newArrival->name <<" arrived; added to ready queue " << printReadyQueue()<<endl;
         }
     }
     
-    void updatReadyQueueFromPreemptPQ(){
-        while(!preemptPQ.empty() && preemptPQ.top().first == curTime){
-            if(cpuStatus == IDLE){
-                cpuStatus = CONTEXT_SWITCH_UP;
+    void prepareRunningProcess(){
+        if(cpuStatus == CONTEXT_SWITCH_UP && remCSTime == 0){
+            curProcess = readyPQ.top().second;
+            readyPQ.pop();
+            
+            if(!preemptedProcesses.count(curProcess->name)){
+            // cout<<curProcess->remCPU.size()<<endl;
+                // preemptedProcesses.insert(curProcess->name);
+                cout<<"time "<< curTime <<"ms: Process "<< curProcess->name<< " (tau " << predictedTau[curProcess->name] << "ms) "  <<"started using the CPU for "<< curProcess->remCPU.back() <<"ms burst " << printReadyQueue() <<endl;
+            }else{
+
+                cout<<"time "<< curTime <<"ms: Process "<< curProcess->name << " (tau " << predictedTau[curProcess->name] << "ms) " <<"started using the CPU with "<< curProcess->remCPU.back() <<"ms burst remaining " << printReadyQueue() <<endl;
             }
-            auto newArrival = preemptPQ.top().second;
-            if(rrPos == BEGINNING){
-                readyQueue.push_front(preemptPQ.top().second);
-            }else if(rrPos == END){
-                readyQueue.push_back(preemptPQ.top().second);
-            }
-            preemptPQ.pop();
-            // cout<<"time "<< curTime <<"ms: Process "<< newArrival->name <<" survived from preempt; added to ready queue " << printReadyQueue()<<endl;
         }
     }
 
+
     void updateReadyQueue(){
-        updatReadyQueueFromPreemptPQ();
         updatReadyQueueFromIOPQ();
         updatReadyQueueFromArrivePQ();
 
@@ -294,13 +300,13 @@ public:
                 cpuStatus = RUNNING;
             }
         }else if(cpuStatus == IDLE){
-            if(!readyQueue.empty()){
+            if(!readyPQ.empty()){
                 cpuStatus = CONTEXT_SWITCH_UP;
             }
         }else if(cpuStatus == CONTEXT_SWITCH_DOWN){
             if(!remCSTime){
                 remCSTime = csTime;
-                if(readyQueue.empty()){
+                if(readyPQ.empty()){
                     cpuStatus = IDLE;
                 }else{
                     cpuStatus = CONTEXT_SWITCH_UP;
@@ -326,31 +332,17 @@ public:
             curProcessRunningTime++;
     }
 
-    void prepareRunningProcess(){
-        if(cpuStatus == CONTEXT_SWITCH_UP && remCSTime == 0){
-            curProcess = readyQueue.front();
-            readyQueue.pop_front();
-            if(!preemptedProcesses.count(curProcess->name)){
-            // cout<<curProcess->remCPU.size()<<endl;
-                // preemptedProcesses.insert(curProcess->name);
-                cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" started using the CPU for "<< curProcess->remCPU.back() <<"ms burst " << printReadyQueue() <<endl;
-            }else{
-                cout<<"time "<< curTime <<"ms: Process "<< curProcess->name <<" started using the CPU with "<< curProcess->remCPU.back() <<"ms burst remaining " << printReadyQueue() <<endl;
-            }
-        }
-    }
-
-    void runRoundRobin(){
+    void runShortestJobFirst(){
         resetAll();
         addArrivePQ();
         while (!isFinished()){
             
             bool finishedBurst = processFinishBurst();
-            bool preemptBurst = rrPreemptSwitchDown();
+            // bool preemptBurst = rrPreemptSwitchDown();
             
             updateReadyQueue();
             prepareRunningProcess();
-            cpuStatusSwitch(finishedBurst || preemptBurst);
+            cpuStatusSwitch(finishedBurst);
             
             curTime ++;
             // cout<<curTime<<" "<<curProcess<<endl;
@@ -361,14 +353,10 @@ public:
             
         }
     }
-
-    void runFirstComeFirstServe(){
-        sliceTime = INT_MAX;
-        runRoundRobin();
-    }
-
-
 };
+
+
+
 
 int getFuckingStupidRandomNumber(int upperbound, double lambda){
 
@@ -387,7 +375,7 @@ int main(int argc, char ** argv){
     int upperbound = atoi(argv[3]);
     int nProcess = atoi(argv[4]);
     int contextSwitchTime = atoi(argv[5]);
-    double tau = atof(argv[6]);
+    double alpha = atof(argv[6]);
     int sliceTime = atoi(argv[7]);
     int rrPos = END;
     if(argc == 9){
@@ -415,9 +403,9 @@ int main(int argc, char ** argv){
     // for(auto p: processes){
     //     p->displayProcessInfo();
     // }
-    // vector<int> 
-    Simulator S(nProcess, sliceTime, contextSwitchTime/2, processes);
-    S.runFirstComeFirstServe();
+
+    Simulator_SJF S(nProcess, sliceTime, contextSwitchTime/2, alpha, lambda, processes);
+    S.runShortestJobFirst();
 
     return 0;
 
